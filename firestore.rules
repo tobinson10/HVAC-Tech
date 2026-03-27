@@ -1,0 +1,152 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: {userId}
+// Fields:
+//   - uid: string (required) - The unique ID of the user.
+//   - email: string (required) - The email address of the user.
+//   - displayName: string (optional)
+//   - role: string (required, enum: ['technician', 'customer'])
+//   - createdAt: timestamp (required)
+//   - address: string (optional) - For customers
+//   - phoneNumber: string (optional) - For customers
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        (request.auth.token.email == "tobinson10@gmail.com") ||
+        (request.auth.token.email == "salawumoshood86@gmail.com") ||
+        (request.auth.uid == "Pq6cSjevRVekfswQhk35qkt6eLu1") ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    function isTechnician() {
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'technician') ||
+        isAdmin()
+      );
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'createdAt']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.role in ['technician', 'customer'] &&
+             data.createdAt is timestamp &&
+             (data.role != 'technician' || (data.keys().hasAll(['technicianId']) && data.technicianId is string && data.technicianId.matches("^TECH-\\d{4}$"))) &&
+             (!('displayName' in data) || data.displayName is string) &&
+             (!('address' in data) || data.address is string) &&
+             (!('phoneNumber' in data) || data.phoneNumber is string);
+    }
+
+    function isValidJob(data) {
+      return data.keys().hasAll(['id', 'customerId', 'customerName', 'address', 'systemType', 'status', 'createdAt']) &&
+             data.id is string &&
+             data.customerId is string &&
+             data.customerName is string &&
+             data.address is string &&
+             data.systemType is string &&
+             data.status in ['scheduled', 'in-progress', 'completed'] &&
+             data.createdAt is timestamp &&
+             (!('scheduledAt' in data) || data.scheduledAt is string);
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['senderId', 'senderName', 'text', 'createdAt']) &&
+             data.senderId == request.auth.uid &&
+             data.senderName is string &&
+             data.text is string &&
+             data.text.size() > 0 &&
+             data.text.size() < 2000 &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidAvailability(data) {
+      return data.keys().hasAll(['day', 'startTime', 'endTime', 'isActive']) &&
+             data.day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] &&
+             data.startTime is string &&
+             data.endTime is string &&
+             data.isActive is bool;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      // Users can read their own profile. Admins can read any profile.
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Users can create their own profile if they are authenticated and the data is valid.
+      // They cannot set themselves as admin via the client.
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && request.resource.data.role != 'admin';
+      
+      // Users can update their own profile, but cannot change their role or uid.
+      allow update: if isOwner(userId) && 
+                    isValidUser(request.resource.data) && 
+                    request.resource.data.role == resource.data.role &&
+                    request.resource.data.uid == resource.data.uid;
+
+      match /availability/{dayId} {
+        // Technicians can read and write their own availability.
+        // Customers can read a technician's availability (to see when they can book).
+        allow read: if isAuthenticated();
+        allow write: if isOwner(userId) && isTechnician() && isValidAvailability(request.resource.data);
+      }
+    }
+
+    match /jobs/{jobId} {
+      // Customers can read their own jobs. Technicians can read all jobs.
+      allow read: if (isAuthenticated() && resource.data.customerId == request.auth.uid) || 
+                  isTechnician() ||
+                  isAdmin();
+      
+      // Customers can create jobs for themselves.
+      allow create: if isAuthenticated() && 
+                    request.resource.data.customerId == request.auth.uid &&
+                    isValidJob(request.resource.data);
+      
+      // Only technicians or admins can update jobs.
+      allow update: if isTechnician() || isAdmin();
+
+      match /messages/{messageId} {
+        // Allow read if user is the customer of the job, a technician, or an admin
+        allow read: if isAuthenticated() && (
+          isAdmin() ||
+          isTechnician() ||
+          (resource.data.senderId == request.auth.uid) || // Allow reading own messages
+          (get(/databases/$(database)/documents/jobs/$(jobId)).data.customerId == request.auth.uid)
+        );
+        
+        // Allow create if user is the customer of the job, a technician, or an admin
+        allow create: if isAuthenticated() && (
+          isAdmin() ||
+          isTechnician() ||
+          (get(/databases/$(database)/documents/jobs/$(jobId)).data.customerId == request.auth.uid)
+        ) && isValidMessage(request.resource.data);
+      }
+    }
+  }
+}

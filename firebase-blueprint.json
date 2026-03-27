@@ -1,0 +1,87 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A user of the application, either a technician or a customer.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique ID of the user." },
+        "email": { "type": "string", "description": "The email address of the user." },
+        "displayName": { "type": "string", "description": "The display name of the user." },
+        "role": { "type": "string", "enum": ["technician", "customer"], "description": "The role of the user." },
+        "address": { "type": "string", "description": "The service address of the customer." },
+        "phoneNumber": { "type": "string", "description": "The phone number of the customer." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the user account was created." }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "CustomerProfile": {
+      "title": "Customer Profile",
+      "description": "Additional information for customer users.",
+      "type": "object",
+      "properties": {
+        "address": { "type": "string", "description": "The service address of the customer." },
+        "phoneNumber": { "type": "string", "description": "The phone number of the customer." }
+      }
+    },
+    "Job": {
+      "title": "Job",
+      "description": "A service job for a customer.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique ID of the job." },
+        "customerId": { "type": "string", "description": "The ID of the customer." },
+        "customerName": { "type": "string", "description": "The name of the customer." },
+        "address": { "type": "string", "description": "The service address." },
+        "systemType": { "type": "string", "description": "The type of HVAC system." },
+        "status": { "type": "string", "enum": ["scheduled", "in-progress", "completed"], "description": "The status of the job." },
+        "scheduledAt": { "type": "string", "format": "date-time", "description": "When the job is scheduled for." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the job was created." }
+      },
+      "required": ["id", "customerId", "customerName", "address", "systemType", "status"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A chat message between a customer and a technician.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique ID of the message." },
+        "senderId": { "type": "string", "description": "The ID of the user who sent the message." },
+        "senderName": { "type": "string", "description": "The name of the user who sent the message." },
+        "text": { "type": "string", "description": "The content of the message." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the message was sent." }
+      },
+      "required": ["senderId", "senderName", "text", "createdAt"]
+    },
+    "Availability": {
+      "title": "Availability",
+      "description": "The working hours for a technician on a specific day.",
+      "type": "object",
+      "properties": {
+        "day": { "type": "string", "enum": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], "description": "The day of the week." },
+        "startTime": { "type": "string", "description": "The start time of the shift (e.g., '09:00')." },
+        "endTime": { "type": "string", "description": "The end time of the shift (e.g., '17:00')." },
+        "isActive": { "type": "boolean", "description": "Whether the technician is available on this day." }
+      },
+      "required": ["day", "startTime", "endTime", "isActive"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "The user document containing core profile information."
+    },
+    "/jobs/{jobId}": {
+      "schema": "Job",
+      "description": "A service job record."
+    },
+    "/jobs/{jobId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Chat messages for a specific job."
+    },
+    "/users/{userId}/availability/{dayId}": {
+      "schema": "Availability",
+      "description": "The technician's availability for a specific day."
+    }
+  }
+}

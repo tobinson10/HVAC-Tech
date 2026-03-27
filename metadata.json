@@ -1,0 +1,7 @@
+{
+  "name": "HVAC Callback Shield + Comm",
+  "description": "A focused prototype for HVAC technicians to reduce callbacks through guided checklists and real-time customer communication.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
