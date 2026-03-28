@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
+import React, { useState, useEffect, createContext, useContext, useCallback, useRef, useMemo, Component } from 'react';
 import { BrowserRouter, Routes, Route, useNavigate, useParams, Link, Navigate } from 'react-router-dom';
 import { 
   Shield, 
@@ -30,9 +30,11 @@ import {
   Calendar,
   Menu,
   Bell,
+  BellOff,
   X,
   Phone,
-  Navigation
+  Navigation,
+  AlertCircle
 } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
@@ -48,9 +50,9 @@ L.Icon.Default.mergeOptions({
 
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { CHECKLIST_STEPS, Job, JobStepStatus, Message, Availability } from './types';
+import { CHECKLIST_STEPS, Job, JobStepStatus, Message, Availability, Notification } from './types';
 import { getSmartSuggestions } from './services/geminiService';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { auth, db, handleFirestoreError, OperationType, sendNotification } from './firebase';
 import { 
   onAuthStateChanged, 
   signInWithEmailAndPassword, 
@@ -60,7 +62,7 @@ import {
   signOut, 
   User as FirebaseUser 
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp, addDoc, collection, query, where, onSnapshot, updateDoc, orderBy, getDocs } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp, addDoc, collection, query, where, onSnapshot, updateDoc, orderBy, getDocs, limit } from 'firebase/firestore';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -235,10 +237,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     let unsubscribeDoc: (() => void) | null = null;
 
     const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
-      console.log("AuthProvider: onAuthStateChanged fired, user:", firebaseUser?.email);
+      console.log("AuthProvider: onAuthStateChanged fired, user:", firebaseUser?.email, "uid:", firebaseUser?.uid);
       setUser(firebaseUser);
       
       if (unsubscribeDoc) {
+        console.log("AuthProvider: Cleaning up previous onSnapshot");
         unsubscribeDoc();
         unsubscribeDoc = null;
       }
@@ -246,18 +249,23 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       if (firebaseUser) {
         // Check if user is an admin by email
         const isAdminEmail = firebaseUser.email === 'tobinson10@gmail.com' || firebaseUser.email === 'salawumoshood86@gmail.com';
+        console.log("AuthProvider: User is admin by email:", isAdminEmail);
         
         // Use onSnapshot for real-time updates to user data
+        console.log("AuthProvider: Setting up onSnapshot for users/", firebaseUser.uid);
         unsubscribeDoc = onSnapshot(doc(db, 'users', firebaseUser.uid), (doc) => {
-          console.log("AuthProvider: onSnapshot fired, exists:", doc.exists());
+          console.log("AuthProvider: onSnapshot received data, exists:", doc.exists());
           if (doc.exists()) {
             const data = doc.data() as UserData;
+            console.log("AuthProvider: User data found, role:", data.role);
             setUserData(data);
             setUserRole(data.role);
           } else {
+            console.log("AuthProvider: User document does not exist in Firestore");
             setUserData(null);
             // If user doc doesn't exist but it's an admin email, treat as technician
             if (isAdminEmail) {
+              console.log("AuthProvider: Admin email detected, assigning technician role");
               setUserRole('technician');
             } else {
               setUserRole(null);
@@ -265,14 +273,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           }
           setLoading(false);
         }, (error) => {
-          console.error("Error fetching user data:", error);
+          console.error("AuthProvider: Error fetching user data from Firestore:", error);
           // Even if fetch fails, if it's an admin email, we can try to let them in
           if (isAdminEmail) {
+            console.log("AuthProvider: Error occurred but admin email detected, assigning technician role");
             setUserRole('technician');
           }
           setLoading(false);
         });
       } else {
+        console.log("AuthProvider: No firebaseUser found, clearing state");
         setUserData(null);
         setUserRole(null);
         setLoading(false);
@@ -297,8 +307,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
   }, [isBypass]);
 
+  const value = useMemo(() => ({ 
+    user, 
+    userData, 
+    userRole, 
+    loading, 
+    setBypassUser 
+  }), [user, userData, userRole, loading, setBypassUser]);
+
   return (
-    <AuthContext.Provider value={{ user, userData, userRole, loading, setBypassUser }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );
@@ -308,8 +326,225 @@ export const useAuth = () => useContext(AuthContext);
 
 // --- Components ---
 
-const ChatModal = ({ jobId, isOpen, onClose, recipientName }: { jobId: string, isOpen: boolean, onClose: () => void, recipientName: string }) => {
+// --- Error Boundary ---
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: any;
+}
+
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("ErrorBoundary caught an error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      let errorMessage = "Something went wrong.";
+      try {
+        const parsedError = JSON.parse(this.state.error.message);
+        errorMessage = `Firestore Error: ${parsedError.error} during ${parsedError.operationType} on ${parsedError.path}`;
+      } catch (e) {
+        errorMessage = this.state.error?.message || errorMessage;
+      }
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+          <Card className="max-w-md w-full p-6 text-center space-y-4">
+            <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto">
+              <AlertTriangle size={32} />
+            </div>
+            <h2 className="text-xl font-black text-slate-800 uppercase tracking-tight">Application Error</h2>
+            <p className="text-sm text-slate-600">{errorMessage}</p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-colors"
+            >
+              Reload Application
+            </button>
+          </Card>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+const NotificationCenter = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }) => {
   const { user } = useAuth();
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!user || !isOpen) return;
+
+    const q = query(
+      collection(db, 'users', user.uid, 'notifications'),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const notifs = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Notification[];
+      setNotifications(notifs);
+      setLoading(false);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/notifications`);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [user, isOpen]);
+
+  const markAsRead = async (notifId: string) => {
+    if (!user) return;
+    try {
+      await updateDoc(doc(db, 'users', user.uid, 'notifications', notifId), {
+        read: true
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/notifications/${notifId}`);
+    }
+  };
+
+  const handleNotifClick = (notif: Notification) => {
+    markAsRead(notif.id);
+    if (notif.jobId) {
+      navigate('/history');
+    }
+    onClose();
+  };
+
+  const markAllAsRead = async () => {
+    if (!user) return;
+    const unread = notifications.filter(n => !n.read);
+    try {
+      await Promise.all(unread.map(n => 
+        updateDoc(doc(db, 'users', user.uid, 'notifications', n.id), { read: true })
+      ));
+    } catch (error) {
+      console.error("Error marking all as read:", error);
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4">
+      <motion.div 
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={onClose}
+        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+      />
+      <motion.div 
+        initial={{ y: '100%' }}
+        animate={{ y: 0 }}
+        exit={{ y: '100%' }}
+        className="relative bg-white w-full max-w-md h-[70vh] rounded-t-3xl sm:rounded-3xl flex flex-col shadow-2xl overflow-hidden"
+      >
+        <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-white shrink-0">
+          <div>
+            <h3 className="text-xl font-black text-slate-800 leading-tight">Notifications</h3>
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Stay updated on your service</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {notifications.some(n => !n.read) && (
+              <button 
+                onClick={markAllAsRead}
+                className="text-[10px] font-black text-blue-600 uppercase tracking-widest hover:bg-blue-50 px-2 py-1 rounded-lg transition-colors"
+              >
+                Mark all read
+              </button>
+            )}
+            <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+              <X size={20} className="text-slate-400" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/50">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-4">
+              <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Fetching updates...</p>
+            </div>
+          ) : notifications.length === 0 ? (
+            <div className="text-center py-16 px-6">
+              <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-6 text-slate-300">
+                <BellOff size={32} />
+              </div>
+              <h4 className="text-lg font-black text-slate-800 mb-2">All caught up!</h4>
+              <p className="text-sm text-slate-400 font-medium">You don't have any notifications at the moment.</p>
+            </div>
+          ) : (
+            notifications.map((notif) => (
+              <button
+                key={notif.id}
+                onClick={() => handleNotifClick(notif)}
+                className={cn(
+                  "w-full text-left p-4 rounded-2xl transition-all border flex gap-4 group active:scale-[0.98]",
+                  notif.read 
+                    ? "bg-white border-slate-100 opacity-75" 
+                    : "bg-white border-blue-100 shadow-sm ring-1 ring-blue-50"
+                )}
+              >
+                <div className={cn(
+                  "w-12 h-12 rounded-xl flex items-center justify-center shrink-0",
+                  notif.type === 'success' ? "bg-emerald-100 text-emerald-600" :
+                  notif.type === 'warning' ? "bg-amber-100 text-amber-600" :
+                  notif.type === 'error' ? "bg-rose-100 text-rose-600" :
+                  "bg-blue-100 text-blue-600"
+                )}>
+                  {notif.type === 'success' ? <CheckCircle2 size={24} /> :
+                   notif.type === 'warning' ? <AlertTriangle size={24} /> :
+                   notif.type === 'error' ? <AlertCircle size={24} /> :
+                   <Bell size={24} />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between mb-1">
+                    <h4 className={cn(
+                      "font-black text-sm truncate",
+                      notif.read ? "text-slate-600" : "text-slate-800"
+                    )}>{notif.title}</h4>
+                    {!notif.read && <div className="w-2 h-2 bg-blue-600 rounded-full" />}
+                  </div>
+                  <p className="text-xs text-slate-500 font-medium line-clamp-2 mb-2 leading-relaxed">
+                    {notif.message}
+                  </p>
+                  <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest">
+                    {notif.createdAt?.toDate ? notif.createdAt.toDate().toLocaleDateString() : 'Just now'}
+                  </span>
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+const ChatModal = ({ jobId, isOpen, onClose, recipientName }: { jobId: string, isOpen: boolean, onClose: () => void, recipientName: string }) => {
+  const { user, userRole } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(true);
@@ -358,6 +593,22 @@ const ChatModal = ({ jobId, isOpen, onClose, recipientName }: { jobId: string, i
     setNewMessage('');
     try {
       await addDoc(collection(db, 'jobs', jobId, 'messages'), msgData);
+      
+      // Send notification to recipient
+      if (userRole === 'technician') {
+        // Find job to get customerId
+        const jobDoc = await getDoc(doc(db, 'jobs', jobId));
+        if (jobDoc.exists()) {
+          const jobData = jobDoc.data() as Job;
+          await sendNotification(
+            jobData.customerId,
+            "New Message",
+            `Your technician sent you a message: "${newMessage.trim().substring(0, 50)}${newMessage.length > 50 ? '...' : ''}"`,
+            'info',
+            jobId
+          );
+        }
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, `jobs/${jobId}/messages`);
     }
@@ -462,7 +713,20 @@ const ChatModal = ({ jobId, isOpen, onClose, recipientName }: { jobId: string, i
 };
 
 const ProtectedRoute = ({ children, role }: { children: React.ReactNode; role?: 'technician' | 'customer' }) => {
-  const { user, userRole, loading } = useAuth();
+  const { user, userRole, loading, setBypassUser } = useAuth();
+  const [showReset, setShowReset] = useState(false);
+
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (loading) {
+      timer = setTimeout(() => {
+        setShowReset(true);
+      }, 5000);
+    } else {
+      setShowReset(false);
+    }
+    return () => clearTimeout(timer);
+  }, [loading]);
   
   if (loading) {
     return (
@@ -470,6 +734,14 @@ const ProtectedRoute = ({ children, role }: { children: React.ReactNode; role?: 
         <div className="flex flex-col items-center gap-4">
           <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Verifying Access...</p>
+          {showReset && (
+            <button 
+              onClick={() => window.location.reload()}
+              className="mt-4 px-4 py-2 bg-white border border-slate-200 rounded-xl text-[10px] font-black text-slate-600 uppercase tracking-widest hover:bg-slate-50 transition-colors"
+            >
+              Taking too long? Reload
+            </button>
+          )}
         </div>
       </div>
     );
@@ -484,6 +756,12 @@ const ProtectedRoute = ({ children, role }: { children: React.ReactNode; role?: 
         <div className="flex flex-col items-center gap-4">
           <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Loading Profile...</p>
+          <button 
+            onClick={() => setBypassUser(role)}
+            className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-700 transition-colors"
+          >
+            Skip to Demo {role}
+          </button>
         </div>
       </div>
     );
@@ -495,7 +773,24 @@ const ProtectedRoute = ({ children, role }: { children: React.ReactNode; role?: 
 
 const Header = ({ title, showBack = false, transparent = false }: { title: string; showBack?: boolean; transparent?: boolean }) => {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, userRole } = useAuth();
+  const [isNotifOpen, setIsNotifOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    if (!user || userRole !== 'customer') return;
+
+    const q = query(
+      collection(db, 'users', user.uid, 'notifications'),
+      where('read', '==', false)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setUnreadCount(snapshot.size);
+    });
+
+    return () => unsubscribe();
+  }, [user, userRole]);
 
   const handleLogout = async () => {
     await signOut(auth);
@@ -503,41 +798,60 @@ const Header = ({ title, showBack = false, transparent = false }: { title: strin
   };
 
   return (
-    <header className={cn(
-      "sticky top-0 z-50 px-4 py-3 flex items-center justify-between transition-all duration-300",
-      transparent ? "bg-transparent" : "bg-white/80 backdrop-blur-md border-b border-slate-100 shadow-sm",
-      "pt-[env(safe-area-inset-top,12px)]"
-    )}>
-      <div className="flex items-center gap-3">
-        {showBack && (
-          <button 
-            onClick={() => navigate(-1)} 
-            className="p-2 -ml-2 hover:bg-slate-100 rounded-full transition-colors active:scale-95"
-          >
-            <ArrowLeft size={20} className={transparent ? "text-white" : "text-slate-600"} />
-          </button>
-        )}
-        <div className="flex items-center gap-2">
-          {!showBack && <Shield className={transparent ? "text-white" : "text-blue-600"} size={24} />}
-          <h1 className={cn(
-            "font-extrabold text-lg tracking-tight",
-            transparent ? "text-white" : "text-slate-800"
-          )}>{title}</h1>
+    <>
+      <header className={cn(
+        "sticky top-0 z-50 px-4 py-3 flex items-center justify-between transition-all duration-300",
+        transparent ? "bg-transparent" : "bg-white/80 backdrop-blur-md border-b border-slate-100 shadow-sm",
+        "pt-[env(safe-area-inset-top,12px)]"
+      )}>
+        <div className="flex items-center gap-3">
+          {showBack && (
+            <button 
+              onClick={() => navigate(-1)} 
+              className="p-2 -ml-2 hover:bg-slate-100 rounded-full transition-colors active:scale-95"
+            >
+              <ArrowLeft size={20} className={transparent ? "text-white" : "text-slate-600"} />
+            </button>
+          )}
+          <div className="flex items-center gap-2">
+            {!showBack && <Shield className={transparent ? "text-white" : "text-blue-600"} size={24} />}
+            <h1 className={cn(
+              "font-extrabold text-lg tracking-tight",
+              transparent ? "text-white" : "text-slate-800"
+            )}>{title}</h1>
+          </div>
         </div>
-      </div>
-      {user && (
-        <button 
-          onClick={handleLogout} 
-          className={cn(
-            "p-2 rounded-full transition-all active:scale-95",
-            transparent ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-          )} 
-          title="Logout"
-        >
-          <LogOut size={18} />
-        </button>
-      )}
-    </header>
+        <div className="flex items-center gap-2">
+          {user && userRole === 'customer' && (
+            <button 
+              onClick={() => setIsNotifOpen(true)}
+              className={cn(
+                "p-2 rounded-full transition-all active:scale-95 relative",
+                transparent ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              )}
+            >
+              <Bell size={18} />
+              {unreadCount > 0 && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-rose-500 rounded-full border border-white" />
+              )}
+            </button>
+          )}
+          {user && (
+            <button 
+              onClick={handleLogout} 
+              className={cn(
+                "p-2 rounded-full transition-all active:scale-95",
+                transparent ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              )} 
+              title="Logout"
+            >
+              <LogOut size={18} />
+            </button>
+          )}
+        </div>
+      </header>
+      <NotificationCenter isOpen={isNotifOpen} onClose={() => setIsNotifOpen(false)} />
+    </>
   );
 };
 
@@ -1454,7 +1768,7 @@ const CustomerHome = () => {
   const prevJobsRef = useRef<Job[]>([]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user?.uid) return;
 
     const q = query(collection(db, 'jobs'), where('customerId', '==', user.uid));
     
@@ -1480,7 +1794,14 @@ const CustomerHome = () => {
       
       // Find the most recent active job (scheduled or in-progress)
       const active = jobs.find(j => j.status === 'in-progress' || j.status === 'scheduled');
-      setActiveJob(active || null);
+      
+      // Only update active job if it's different to prevent loops
+      setActiveJob(prev => {
+        if (!active && !prev) return null;
+        if (active && prev && active.id === prev.id && active.status === prev.status) return prev;
+        return active || null;
+      });
+      
       setLoading(false);
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, 'jobs');
@@ -1488,14 +1809,17 @@ const CustomerHome = () => {
     });
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user?.uid]);
 
   useEffect(() => {
     // Keep mock job for Sarah demo if no real jobs exist
     if (user?.displayName?.includes('Sarah') && userJobs.length === 0) {
-      setActiveJob(MOCK_JOBS[0]);
+      setActiveJob(prev => {
+        if (prev?.id === MOCK_JOBS[0].id) return prev;
+        return MOCK_JOBS[0];
+      });
     }
-  }, [user, userJobs]);
+  }, [user?.displayName, userJobs.length]);
 
   return (
     <PageLayout title="My HVAC Shield" activeTab="home">
@@ -2127,14 +2451,25 @@ const JobChecklist = () => {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [id, job?.status]);
 
+  const initializedRef = useRef<string | null>(null);
+  const initializingRef = useRef(false);
+
   useEffect(() => {
     if (!id) return;
+
+    // Reset state for new ID
+    if (initializedRef.current !== id) {
+      setSteps([]);
+      setJob(null);
+      initializingRef.current = false;
+    }
 
     // Check mock first
     const foundJob = MOCK_JOBS.find(j => j.id === id);
     if (foundJob) {
       setJob(foundJob);
       setSteps(CHECKLIST_STEPS.map(s => ({ stepId: s.id, status: 'pending' })));
+      initializedRef.current = id;
       return;
     }
 
@@ -2142,22 +2477,41 @@ const JobChecklist = () => {
     const unsubscribe = onSnapshot(doc(db, 'jobs', id), (snapshot) => {
       if (snapshot.exists()) {
         const data = snapshot.data() as Job;
-        setJob({ ...data, id: snapshot.id });
+        
+        // Only update job if data changed to prevent unnecessary re-renders
+        setJob(prev => {
+          if (prev && JSON.stringify(prev) === JSON.stringify({ ...data, id: snapshot.id })) return prev;
+          return { ...data, id: snapshot.id };
+        });
         
         // Set start time if not already set and job is being viewed by tech
-        if (!data.startTime && data.status !== 'completed') {
+        if (!data.startTime && data.status !== 'completed' && !initializingRef.current) {
+          initializingRef.current = true;
           updateDoc(doc(db, 'jobs', id), {
             startTime: new Date().toISOString(),
             status: 'in-progress'
-          }).catch(err => console.error("Error setting start time:", err));
+          }).then(() => {
+            sendNotification(
+              data.customerId,
+              "Technician is starting!",
+              `Your technician has started working on your ${data.systemType} service.`,
+              'info',
+              id
+            );
+          }).catch(err => {
+            console.error("Error setting start time:", err);
+            initializingRef.current = false;
+          });
         }
 
-        if (steps.length === 0) {
+        // Initialize steps only once per job ID
+        if (initializedRef.current !== id) {
           if (data.steps && data.steps.length > 0) {
             setSteps(data.steps);
           } else {
             setSteps(CHECKLIST_STEPS.map(s => ({ stepId: s.id, status: 'pending' })));
           }
+          initializedRef.current = id;
         }
       }
     }, (error) => {
@@ -2205,6 +2559,15 @@ const JobChecklist = () => {
           completedAt: new Date().toISOString(),
           steps: steps // Save the checklist steps
         });
+        
+        // Send notification to customer
+        await sendNotification(
+          job.customerId,
+          "Service Completed!",
+          `Your ${job.systemType} service is complete. You can now view the full report.`,
+          'success',
+          id
+        );
       }
       navigate(`/tech/job/${id}/summary`);
     } catch (error) {
@@ -3574,47 +3937,66 @@ const CustomerPortal = () => {
   );
 };
 
+const MainContent = () => {
+  const { user, userRole, loading } = useAuth();
+
+  useEffect(() => {
+    console.log("App: Global state check", { 
+      authStatus: user ? "Authenticated" : "Unauthenticated",
+      email: user?.email,
+      role: userRole,
+      loading: loading
+    });
+  }, [user, userRole, loading]);
+
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        
+        <Route path="/" element={<Navigate to="/login" />} />
+        
+        <Route path="/tech" element={
+          <ProtectedRoute role="technician">
+            <TechDashboard />
+          </ProtectedRoute>
+        } />
+        <Route path="/tech/availability" element={
+          <ProtectedRoute role="technician">
+            <AvailabilitySettings />
+          </ProtectedRoute>
+        } />
+        <Route path="/tech/job/:id" element={
+          <ProtectedRoute role="technician">
+            <JobChecklist />
+          </ProtectedRoute>
+        } />
+        <Route path="/tech/job/:id/summary" element={
+          <ProtectedRoute role="technician">
+            <JobSummary />
+          </ProtectedRoute>
+        } />
+        
+        <Route path="/customer-home" element={
+          <ProtectedRoute role="customer">
+            <CustomerHome />
+          </ProtectedRoute>
+        } />
+        
+        <Route path="/customer/job/:id" element={<CustomerPortal />} />
+        <Route path="/customer/history/:id" element={<CustomerPortal />} />
+      </Routes>
+    </BrowserRouter>
+  );
+};
+
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
-          
-          <Route path="/" element={<Navigate to="/login" />} />
-          
-          <Route path="/tech" element={
-            <ProtectedRoute role="technician">
-              <TechDashboard />
-            </ProtectedRoute>
-          } />
-          <Route path="/tech/availability" element={
-            <ProtectedRoute role="technician">
-              <AvailabilitySettings />
-            </ProtectedRoute>
-          } />
-          <Route path="/tech/job/:id" element={
-            <ProtectedRoute role="technician">
-              <JobChecklist />
-            </ProtectedRoute>
-          } />
-          <Route path="/tech/job/:id/summary" element={
-            <ProtectedRoute role="technician">
-              <JobSummary />
-            </ProtectedRoute>
-          } />
-          
-          <Route path="/customer-home" element={
-            <ProtectedRoute role="customer">
-              <CustomerHome />
-            </ProtectedRoute>
-          } />
-          
-          <Route path="/customer/job/:id" element={<CustomerPortal />} />
-          <Route path="/customer/history/:id" element={<CustomerPortal />} />
-        </Routes>
-      </BrowserRouter>
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <MainContent />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }

@@ -91,6 +91,16 @@ service cloud.firestore {
              data.isActive is bool;
     }
 
+    function isValidNotification(data) {
+      return data.keys().hasAll(['title', 'message', 'type', 'read', 'createdAt']) &&
+             data.title is string &&
+             data.message is string &&
+             data.type in ['info', 'success', 'warning', 'error'] &&
+             data.read is bool &&
+             data.createdAt is timestamp &&
+             (!('jobId' in data) || data.jobId is string);
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -114,6 +124,18 @@ service cloud.firestore {
         // Customers can read a technician's availability (to see when they can book).
         allow read: if isAuthenticated();
         allow write: if isOwner(userId) && isTechnician() && isValidAvailability(request.resource.data);
+      }
+
+      match /notifications/{notificationId} {
+        // Users can read and update (mark as read) their own notifications.
+        allow read: if isOwner(userId);
+        allow update: if isOwner(userId) && 
+                      isValidNotification(request.resource.data) &&
+                      request.resource.data.title == resource.data.title &&
+                      request.resource.data.message == resource.data.message;
+        
+        // Technicians and admins can create notifications for any user.
+        allow create: if (isTechnician() || isAdmin()) && isValidNotification(request.resource.data);
       }
     }
 

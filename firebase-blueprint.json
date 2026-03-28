@@ -64,6 +64,21 @@
         "isActive": { "type": "boolean", "description": "Whether the technician is available on this day." }
       },
       "required": ["day", "startTime", "endTime", "isActive"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "An in-app notification for a user.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique ID of the notification." },
+        "title": { "type": "string", "description": "The title of the notification." },
+        "message": { "type": "string", "description": "The content of the notification." },
+        "type": { "type": "string", "enum": ["info", "success", "warning", "error"], "description": "The type of notification." },
+        "read": { "type": "boolean", "description": "Whether the notification has been read." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the notification was created." },
+        "jobId": { "type": "string", "description": "The ID of the job related to this notification." }
+      },
+      "required": ["title", "message", "type", "read", "createdAt"]
     }
   },
   "firestore": {
@@ -82,6 +97,10 @@
     "/users/{userId}/availability/{dayId}": {
       "schema": "Availability",
       "description": "The technician's availability for a specific day."
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "In-app notifications for a specific user."
     }
   }
 }

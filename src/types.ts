@@ -55,6 +55,16 @@ export interface Message {
   createdAt: any;
 }
 
+export interface Notification {
+  id: string;
+  title: string;
+  message: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+  read: boolean;
+  createdAt: any;
+  jobId?: string;
+}
+
 export const CHECKLIST_STEPS: ChecklistStep[] = [
   { id: 'thermostat', label: 'Verify thermostat calibration', description: 'Ensure setpoint matches ambient temp.', photoRequiredOnIssue: true, isCritical: false, category: 'electrical' },
   { id: 'drain', label: 'Check/clean condensate drain', description: 'Clear any blockages and verify flow.', photoRequiredOnIssue: true, isCritical: true, category: 'mechanical' },

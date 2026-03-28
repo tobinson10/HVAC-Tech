@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
@@ -57,3 +57,18 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }
+
+export const sendNotification = async (userId: string, title: string, message: string, type: 'info' | 'success' | 'warning' | 'error' = 'info', jobId?: string) => {
+  try {
+    await addDoc(collection(db, 'users', userId, 'notifications'), {
+      title,
+      message,
+      type,
+      read: false,
+      createdAt: serverTimestamp(),
+      jobId: jobId || null
+    });
+  } catch (error) {
+    console.error("Error sending notification:", error);
+  }
+};
